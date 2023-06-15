@@ -1,18 +1,20 @@
 import sys
-import urllib
-import requests
-import pygame
+import re
 import json
 import base64
-import re
+
+import urllib.error
+import urllib.request
+import requests
+import pygame
+
 from itertools import groupby
-from urllib import error, request
 from urllib.parse import quote
 from bs4 import BeautifulSoup
 from bs4 import element
 
 
-def check_redundancy(dict1: dict) -> (list, bool):
+def find_nonredundant_keys(dict1: dict) -> (list, bool):
     with open("dictionary_entries_cache.txt", "r") as file:
         dict2 = json.loads(file.readlines()[2])
     if set(dict1.keys()).issubset(set(dict2.keys())):
@@ -27,12 +29,54 @@ def delete_entry(command: str, dicts: list) -> None:
         if command.split("-")[1].strip() == "all":
             for my_dict in dicts:
                 my_dict.clear()
+            delete_all_items()
         elif command.split("-")[1].strip().isalnum():
-            for my_dict in dicts:
-                my_dict.pop(command.split("-")[1].strip())
+            key = command.split("-")[1].strip()
+            try:
+                for my_dict in dicts:
+                    my_dict.pop(key)
+            except KeyError:
+                print("Kunne ikke finde ordet. Gennemgå ordlisten!")
+            delete_one_item(key=key)
     else:
         for my_dict in dicts:
             my_dict.popitem()
+        delete_one_item(del_last=True)
+
+
+def delete_one_item(key: str = "", del_last: bool = False) -> None:
+    all_dicts = get_dicts_cache()
+    transcription_dict = get_transcriptions(all_dicts[0])
+    audios_dict = get_audio_binaries(all_dicts[1])
+    meanings_dict = all_dicts[2]
+    try:
+        if del_last:
+            last_item = transcription_dict.popitem()[0]
+            meanings_dict.pop(last_item)
+            audios_dict.pop(last_item)
+        elif key:
+            transcription_dict.pop(key)
+            meanings_dict.pop(key)
+            audios_dict.pop(key)
+    except KeyError:
+        pass
+    finally:
+        delete_all_items()
+        append_dicts_cache([transcription_dict, audios_dict, meanings_dict])
+
+
+def clear_dicts_cache():
+    with open("dictionary_entries_cache.txt", "w") as file:
+        for i in range(3):
+            file.write(json.dumps({}) + "\n")
+        file.seek(0, 2)
+        file.truncate(file.tell() - 1)
+
+
+def delete_all_items() -> None:
+    with open("audio_binaries", "wb") as file2:
+        clear_dicts_cache()
+        file2.write(b"")
 
 
 def fetch_html_file(user_input: str) -> (BeautifulSoup, None):
@@ -47,15 +91,14 @@ def fetch_html_file(user_input: str) -> (BeautifulSoup, None):
         raise e
 
 
-def fetch_url(url):
+def fetch_url(url: str):
     response = urllib.request.urlopen(url)
     return response
 
 
 def find_betydninger(bs_obj: BeautifulSoup, betydninger: dict) -> None:
-    betydninger_instances = bs_obj.find(
-        "div", id="content-betydninger").find_all(class_="definitionIndent",
-                                                  recursive=False)
+    betydninger_instances = bs_obj.find("div", id="content-betydninger").find_all(
+        class_="definitionIndent", recursive=False)
     entries_dict = {}
     for i, instance in enumerate(betydninger_instances):
         definition = instance.find(class_="definition").text
@@ -109,7 +152,7 @@ def find_conflicts(html_file: BeautifulSoup) -> (BeautifulSoup, None):
 
 def find_lydfiler(bs_obj: BeautifulSoup, lydfiler: dict):
     audio_ids = [
-        audio["id"] for audio in bs_obj.find(id="id-udt").find_all("audio")
+        audio["id"] if audio else None for audio in bs_obj.find(id="id-udt").find_all("audio")
     ]
     anchor_elements = [
         bs_obj.find(id="id-udt").find(id=id_element + "_fallback")
@@ -219,50 +262,59 @@ def process_flag_audio(command: str, audios_dict: dict):
 
 
 def read_dicts():
-    return_dicts = []
-    lydfiler_dict = {}
-    udtale_dict = {}
-    pattern = r'\{.*\}'
+    dicts_array = get_dicts_cache()
+    return [get_transcriptions(dicts_array[0]), get_audio_binaries(dicts_array[1]), dicts_array[2]]
+
+
+def get_dicts_cache() -> list:
     with open("dictionary_entries_cache.txt", "r") as file:
         content = file.read()
-    with open("audio_binaries", "rb") as file:
-        audio_content = file.readlines()
+    pattern = r'\{.*\}'
     dicts_array = re.findall(pattern, content)
     dicts_array = [json.loads(my_dict) for my_dict in dicts_array]
-    for key, value in dicts_array[0].items():
-        udtale_dict[key] = []
+    return dicts_array
+
+
+def get_transcriptions(transcriptions: dict) -> dict:
+    return_dict = {}
+    for key, value in transcriptions.items():
+        return_dict[key] = []
         for value_dict in value:
             tag = BeautifulSoup(value_dict["tag"], 'html.parser').find()
             prev_tag = BeautifulSoup(value_dict["prev_sib"], 'html.parser').find()
             tag.previous_sibling = prev_tag
-            udtale_dict[key].append(tag)
-    formatted_binaries = [line for i, line in enumerate(audio_content) if line != b'']
+            return_dict[key].append(tag)
+    return return_dict
+
+
+def get_audio_binaries(keys_dict: dict) -> dict:
+    with open("audio_binaries", "rb") as file:
+        binaries = file.readlines()
+    return_dict = {}
+    formatted_binaries = [line for i, line in enumerate(binaries) if line != b'']
     formatted_binaries = [
         list(group)
         for key, group in groupby(formatted_binaries, lambda x: x == b"\n")
         if not key
     ]
-    for audio_binary_list, (key, value) in zip(formatted_binaries, dicts_array[1].items()):
-        lydfiler_dict[key] = []
+    for audio_binary_list, (key, value) in zip(formatted_binaries, keys_dict.items()):
+        return_dict[key] = []
         for audio_binary in audio_binary_list:
-            lydfiler_dict[key].append(base64.b64decode(audio_binary))
-    return_dicts.extend([udtale_dict, lydfiler_dict, dicts_array[2]])
-    return return_dicts
+            return_dict[key].append(base64.b64decode(audio_binary))
+    return return_dict
 
 
-def serialize_dicts(local: dict, remote: str, file):
-    if isinstance(list(local.values())[0], list) and isinstance(
-            list(local.values())[0][0], bytes):
+def serialize_dicts(local: dict, remote: str, file, audio_file):
+    if isinstance(list(local.values())[0], list) and isinstance(list(local.values())[0][0], bytes):
         remote_deserialized = json.loads(remote)
         key_no_value_local = {key: [] for key in local}
         remote_deserialized.update(key_no_value_local)
         file.write(json.dumps(remote_deserialized) + "\n")
-        with open("audio_binaries", "ab+") as audio_file:
-            for value in list(local.values()):
-                for subvalue in value:
-                    audio_file.write(base64.b64encode(subvalue))
-                    audio_file.write(b"\n")
+        for value in list(local.values()):
+            for subvalue in value:
+                audio_file.write(base64.b64encode(subvalue))
                 audio_file.write(b"\n")
+            audio_file.write(b"\n")
     else:
         remote_deserialized = json.loads(remote)
         if isinstance(list(local.values())[0], list) and isinstance(
@@ -278,12 +330,15 @@ def serialize_dicts(local: dict, remote: str, file):
         file.write(json.dumps(remote_deserialized) + "\n")
 
 
-def write_dicts(dicts: list):
-    with open("dictionary_entries_cache.txt", "r+") as file:
+def append_dicts_cache(dicts: list):
+    with open("dictionary_entries_cache.txt", "r+") as file, open("audio_binaries", "ab+") as audio_file:
         dicts_serialized = file.readlines()
         file.seek(0)
         for my_dict_local, my_dict_remote in zip(dicts, dicts_serialized):
-            serialize_dicts(my_dict_local, my_dict_remote, file)
+            try:
+                serialize_dicts(my_dict_local, my_dict_remote, file, audio_file)
+            except IndexError:
+                file.write(json.dumps({}) + "\n")
         file.seek(0, 2)
         file.truncate(file.tell() - 1)
 
@@ -309,12 +364,12 @@ def main():
                         print("Kunne ikke finde data om ordet")
             user_input = input("-> ")
 
-        keys = check_redundancy(betydninger)
+        keys = find_nonredundant_keys(betydninger)
         if keys:
             recon_udt = {key: udtale_transcriptions[key] for key in keys if key in udtale_transcriptions}
             recon_lyd = {key: lydfiler[key] for key in keys if key in lydfiler}
             recon_bty = {key: betydninger[key] for key in keys if key in betydninger}
-            write_dicts([recon_udt, recon_lyd, recon_bty])
+            append_dicts_cache([recon_udt, recon_lyd, recon_bty])
         command = False
 
         while True:
